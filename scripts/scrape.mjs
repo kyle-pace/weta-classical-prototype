@@ -85,14 +85,18 @@ function cleanHtml(h){
       if(tag.toLowerCase() === 'a' && !close){ const href = (attrs.match(/href="([^"]+)"/) || [])[1]; return href ? `<a href="${abs(href)}" target="_blank" rel="noopener">` : '<a>'; }
       return `<${close}${tag.toLowerCase().replace(/^h[56]$/, 'h4')}>`;
     })
-    .replace(/&nbsp;/g, ' ').replace(/<p>\s*<\/p>/g, '').trim();
+    .replace(/&nbsp;/g, ' ').replace(/<p>\s*<\/p>/g, '').replace(/<[^>]*$/, '').trim();
 }
 async function article(url){
   try {
     const h = await get(url.replace(BASE, ''));
     const date = decode(pick(h, /page-title__dateline">([\s\S]*?)<\/p>/)).replace(/\s*-\s*/, ', ');
     const by = decode(pick(h, /field--name-field-byline[\s\S]*?field__item">([\s\S]*?)<\/div>/));
-    const bodies = [...h.matchAll(/field--name-field-body[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g)].map(m => cleanHtml(m[1])).filter(Boolean);
+    // Each body field runs until the next content block; nested media divs are dropped by cleanHtml.
+    const main = h.slice(h.indexOf('<main'), h.indexOf('</main>') > 0 ? h.indexOf('</main>') : undefined);
+    const bodies = main.split(/field--name-field-body[^>]*>/).slice(1).map(seg => cleanHtml(seg.split(/l-content-flow__item|<\/section>/)[0].replace(/^[^<]*/, ''))).filter(Boolean);
+    // Broadcast-time notes ("The interview can also be heard on…") read better after the article
+    bodies.sort((x, y) => (/^<h4>/.test(x) ? 1 : 0) - (/^<h4>/.test(y) ? 1 : 0));
     const player = pick(h, /<iframe[^>]+src="(https:\/\/weta-rss\.streamguys1\.com\/player\/[^"]+)"/);
     let audio = '', audioDur = 0;
     if(player){ try { const ph = await (await fetch(player, { headers: { 'user-agent': UA } })).text();
