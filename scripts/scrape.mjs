@@ -76,6 +76,31 @@ function cards(html){
   }).filter(c => c.title);
 }
 
+/* Classical Score post: dateline, byline, body text and the interview audio from WETA's embedded player */
+const ALLOWED = /^(p|h2|h3|h4|h5|h6|em|strong|i|b|a|br|ul|ol|li|blockquote)$/i;
+function cleanHtml(h){
+  return h.replace(/<(script|style|iframe)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(\/?)([a-z0-9]+)([^>]*)>/gi, (m, close, tag, attrs) => {
+      if(!ALLOWED.test(tag)) return '';
+      if(tag.toLowerCase() === 'a' && !close){ const href = (attrs.match(/href="([^"]+)"/) || [])[1]; return href ? `<a href="${abs(href)}" target="_blank" rel="noopener">` : '<a>'; }
+      return `<${close}${tag.toLowerCase().replace(/^h[56]$/, 'h4')}>`;
+    })
+    .replace(/&nbsp;/g, ' ').replace(/<p>\s*<\/p>/g, '').trim();
+}
+async function article(url){
+  try {
+    const h = await get(url.replace(BASE, ''));
+    const date = decode(pick(h, /page-title__dateline">([\s\S]*?)<\/p>/)).replace(/\s*-\s*/, ', ');
+    const by = decode(pick(h, /field--name-field-byline[\s\S]*?field__item">([\s\S]*?)<\/div>/));
+    const bodies = [...h.matchAll(/field--name-field-body[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g)].map(m => cleanHtml(m[1])).filter(Boolean);
+    const player = pick(h, /<iframe[^>]+src="(https:\/\/weta-rss\.streamguys1\.com\/player\/[^"]+)"/);
+    let audio = '', audioDur = 0;
+    if(player){ try { const ph = await (await fetch(player, { headers: { 'user-agent': UA } })).text();
+      audio = pick(ph, /(https?:\/\/[^"' ]+\.(?:mp3|m4a))/); audioDur = +pick(ph, /"duration"\s*:\s*(\d+)/) || 0; } catch(e){} }
+    return { date, by, body: bodies.join('\n'), audio, audioDur };
+  } catch(e){ return {}; }
+}
+
 async function main(){
   await mkdir('data', { recursive: true });
   const [today, yday, player] = await Promise.all([
@@ -108,6 +133,7 @@ async function main(){
     articles: cards(scoreH).filter(c => c.url.includes('/classical-score/') && !c.url.includes('/topics/')).slice(0, 16).map(c => ({ title: c.title, dek: c.body, img: c.img, imgLarge: c.imgLarge, url: c.url })),
     programs: cards(featH).filter(c => c.url.includes('/fm/features/')).map(c => ({ name: c.title, desc: c.body, img: c.img, imgLarge: c.imgLarge, url: c.url }))
   };
+  for(const a of content.articles) Object.assign(a, await article(a.url));
   await writeFile('data/content.json', JSON.stringify(content));
   console.log(`content.json: ${content.hosts.length} hosts, ${content.articles.length} articles, ${content.programs.length} programs`);
 }
