@@ -2,6 +2,7 @@
 // Runs in GitHub Actions on a schedule (see .github/workflows/scrape.yml). Node 20+, no dependencies.
 //   data/live.json     playlists for today and yesterday (all three streams) + who's on air
 //   data/content.json  hosts, programs, Classical Score posts
+//   data/pages.json    saved copies of weta.org pages (data/pages/*.html) for the in-app web view
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
 
 const BASE = 'https://weta.org';
@@ -105,6 +106,52 @@ async function article(url){
   } catch(e){ return {}; }
 }
 
+/* ---------- Saved copies of weta.org pages ----------
+   weta.org won't load inside another site's frame, so the web prototype can't show live pages in its
+   in-app web view. Instead it shows these copies: the page without its scripts, with the site's header,
+   menus, footer and cookie banner hidden (the same rules as the iPhone app's web view kit). Refreshed hourly
+   with content.json. data/pages.json lists them by path. */
+const PAGE_PATHS = ['/fm', '/fm/opera', '/fm/hosts', '/fm/waystolisten', '/fm/features', '/fm/classical-score', '/support/waystogive', '/fm/opera/opera-at-eight'];
+const TIDY = `header.masthead, footer.page-footer, .pbs-app-menu, #block-main-menu, .weta-play-ad__wrapper,
+  [id^="js-dfp-tag"], .klaro, .cookie-notice, .cookie-modal, .skip-link, .visually-hidden-focusable { display: none !important; }
+  html, body { overflow-x: hidden; }`;
+const pageFile = p => 'pages/' + (p.replace(/^\/|\/$/g, '').replace(/[^a-z0-9]+/gi, '-') || 'home') + '.html';
+
+function savedCopy(html){
+  const title = decode(pick(html, /<title>([\s\S]*?)<\/title>/)).replace(/\s*\|\s*WETA.*$/i, '');
+  const head = pick(html, /<head[^>]*>([\s\S]*?)<\/head>/);
+  // The site's stylesheets, plus inline styles from the head (the page's banner image is set there)
+  const css = [...head.matchAll(/<link[^>]+rel="stylesheet"[^>]*>|<style[^>]*>[\s\S]*?<\/style>/g)].map(m => m[0]).join('\n');
+  const bodyAttrs = pick(html, /<body([^>]*)>/);
+  const body = pick(html, /<body[^>]*>([\s\S]*)<\/body>/)
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<iframe[^>]+(googletagmanager|doubleclick)[\s\S]*?<\/iframe>/gi, '')
+    .replace(/\sdata-src="([^"]+)"/g, ' src="$1"')
+    .replace(/name="form_build_id" value="[^"]*"/g, '');
+  const out = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><base href="${BASE}/"><title>${title}</title>
+${css}
+<style>${TIDY}</style></head><body${bodyAttrs}>${body}</body></html>`;
+  return { title, html: out };
+}
+
+async function savePages(content){
+  await mkdir('data/pages', { recursive: true });
+  const paths = new Set(PAGE_PATHS);
+  for(const x of [...content.programs, ...content.hosts, ...content.articles]) if(x.url) paths.add(new URL(x.url).pathname.replace(/\/$/, ''));
+  const index = {};
+  const list = [...paths];
+  for(let i = 0; i < list.length; i += 4){
+    await Promise.all(list.slice(i, i + 4).map(async p => {
+      try { const { title, html } = savedCopy(await get(p)); const file = pageFile(p);
+        await writeFile('data/' + file, html); index[p] = { file, title }; } catch(e){ console.warn('page', p, e.message); }
+    }));
+  }
+  await writeFile('data/pages.json', JSON.stringify({ updated: new Date().toISOString(), pages: index }));
+  console.log(`pages: ${Object.keys(index).length} saved copies`);
+}
+
 async function main(){
   await mkdir('data', { recursive: true });
   const [today, yday, player] = await Promise.all([
@@ -127,9 +174,13 @@ async function main(){
   console.log('live.json:', STREAMS.map(s => `${s} ${plays[s].length}`).join(', '), JSON.stringify(live.onAir));
 
   // Content changes slowly: refresh it at most once an hour.
-  let fresh = true;
-  try { const old = JSON.parse(await readFile('data/content.json', 'utf8')); fresh = Date.now() - Date.parse(old.updated) > 55 * 60e3; } catch(e){}
-  if(!fresh && !process.env.FORCE_CONTENT) return;
+  let fresh = true, old = null;
+  try { old = JSON.parse(await readFile('data/content.json', 'utf8')); fresh = Date.now() - Date.parse(old.updated) > 55 * 60e3; } catch(e){}
+  if(!fresh && !process.env.FORCE_CONTENT){
+    // First run with saved pages: make them from the content we already have
+    try { await readFile('data/pages.json'); } catch(e){ await savePages(old); }
+    return;
+  }
   const [hostsH, scoreH, featH] = await Promise.all([get('/fm/hosts'), get('/fm/classical-score'), get('/fm/features')]);
   const content = {
     updated: new Date().toISOString(),
@@ -140,5 +191,6 @@ async function main(){
   for(const a of content.articles) Object.assign(a, await article(a.url));
   await writeFile('data/content.json', JSON.stringify(content));
   console.log(`content.json: ${content.hosts.length} hosts, ${content.articles.length} articles, ${content.programs.length} programs`);
+  await savePages(content);
 }
 main().catch(e => { console.error(e); process.exit(1); });
